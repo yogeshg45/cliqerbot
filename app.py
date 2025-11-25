@@ -76,24 +76,6 @@ def get_trello_labels():
         print(f"Error fetching labels: {e}")
         return []
 
-def get_card_details(card_id):
-    """Fetch detailed card information including activity"""
-    try:
-        url = f"https://api.trello.com/1/cards/{card_id}"
-        params = {
-            'key': TRELLO_API_KEY,
-            'token': TRELLO_TOKEN,
-            'checklists': 'all',
-            'actions': 'all',
-            'fields': 'all'
-        }
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"Error fetching card details: {e}")
-        return None
-
 def normalize_tasks(trello_cards, trello_lists):
     """Convert Trello cards to normalized task format with enhanced data"""
     list_map = {l['id']: l['name'] for l in trello_lists}
@@ -144,13 +126,10 @@ def normalize_tasks(trello_cards, trello_lists):
 # ============================================
 
 def calculate_urgency(task):
-    """
-    Calculate deadline urgency score (0-100)
-    Considers both deadlines and overdue status
-    """
+    """Calculate deadline urgency score (0-100)"""
     deadline = task.get('deadline')
     if not deadline:
-        return 15  # Low urgency for tasks without deadlines
+        return 15
     
     try:
         deadline_date = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
@@ -159,160 +138,130 @@ def calculate_urgency(task):
         days_until = hours_until / 24
         
         if hours_until < 0:
-            # Overdue - scale based on how overdue
             days_overdue = abs(days_until)
             if days_overdue > 7:
-                return 100  # Severely overdue
+                return 100
             elif days_overdue > 3:
                 return 95
             else:
                 return 90
         elif hours_until < 6:
-            return 95  # Due within 6 hours
+            return 95
         elif hours_until < 24:
-            return 85  # Due today
+            return 85
         elif days_until <= 2:
-            return 75  # Due within 2 days
+            return 75
         elif days_until <= 4:
-            return 60  # Due within 4 days
+            return 60
         elif days_until <= 7:
-            return 45  # Due this week
+            return 45
         elif days_until <= 14:
-            return 30  # Due in 2 weeks
+            return 30
         else:
-            return 20  # Due later
+            return 20
     except Exception as e:
         print(f"Error calculating urgency: {e}")
         return 25
 
 def calculate_strategic_value(task):
-    """
-    Calculate strategic alignment score (0-100)
-    Considers labels, keywords, and business impact
-    """
+    """Calculate strategic alignment score (0-100)"""
     labels = [l.lower() for l in task.get('labels', [])]
     title = task.get('title', '').lower()
     description = task.get('description', '').lower()
     
-    # Critical/Emergency labels
     if any(label in labels for label in ['critical', 'blocker', 'emergency', 'urgent']):
         return 95
     
-    # High priority labels
     if any(label in labels for label in ['high', 'important', 'high priority']):
         return 80
     
-    # Bug/Fix indicators
     if any(keyword in title or keyword in description for keyword in ['bug', 'error', 'crash', 'broken', 'fix']):
         return 75
     
-    # User-facing/Revenue impact
     if any(keyword in title or keyword in description for keyword in ['user-facing', 'revenue', 'customer', 'production']):
         return 70
     
-    # Security/Compliance
     if any(keyword in title or keyword in description for keyword in ['security', 'vulnerability', 'compliance', 'audit']):
         return 85
     
-    # Low priority indicators
     if any(label in labels for label in ['low', 'nice to have', 'enhancement', 'future']):
         return 25
     
-    # Default medium priority
     return 50
 
 def calculate_dependency_score(task, all_tasks):
-    """
-    Calculate dependency impact score (0-100)
-    Checks both if this task blocks others and is blocked by others
-    """
-    score = 20  # Base score
+    """Calculate dependency impact score (0-100)"""
+    score = 20
     
     desc = task.get('description', '').lower()
     title = task.get('title', '').lower()
     task_id = task['id']
     
-    # Check if THIS task is a blocker
     if 'blocker' in desc or 'blocking' in title or 'blocks' in desc:
         score += 50
     
-    # Check how many other tasks reference this one (are blocked by it)
     blocked_count = 0
     for other_task in all_tasks:
         if other_task['id'] != task_id:
             other_desc = other_task.get('description', '').lower()
             other_title = other_task.get('title', '').lower()
-            # Check if this task ID or title is mentioned
             if task_id in other_desc or title[:20] in other_desc or title[:20] in other_title:
                 blocked_count += 1
     
-    # Add points for each task that depends on this one
-    score += min(blocked_count * 20, 40)  # Cap at 40 points
+    score += min(blocked_count * 20, 40)
     
-    # Check if this task is blocked by others
     if 'blocked by' in desc or 'waiting for' in desc or 'depends on' in desc:
-        score -= 30  # Reduce priority if blocked
+        score -= 30
     
     return min(max(score, 0), 100)
 
 def calculate_effort_impact(task):
-    """
-    Calculate effort vs impact score (0-100)
-    High score = low effort, high impact (quick wins)
-    """
+    """Calculate effort vs impact score (0-100)"""
     title = task.get('title', '').lower()
     desc = task.get('description', '').lower()
     checklist_items = task.get('total_checklist_items', 0)
     
-    # Quick wins - low effort tasks
     quick_win_keywords = ['typo', 'rename', 'update text', 'copy change', 'wording', 
                           'small fix', 'quick', 'simple', 'minor']
     if any(keyword in title or keyword in desc for keyword in quick_win_keywords):
-        return 90  # Do these first!
+        return 90
     
-    # High effort indicators
     complex_keywords = ['refactor', 'rebuild', 'redesign', 'architecture', 
                        'migration', 'infrastructure', 'integration']
     if any(keyword in title or keyword in desc for keyword in complex_keywords):
-        return 35  # Complex tasks - may need breaking down
+        return 35
     
-    # Check subtasks/checklist complexity
     if checklist_items > 10:
-        return 30  # Very complex
+        return 30
     elif checklist_items > 5:
-        return 45  # Moderately complex
+        return 45
     elif checklist_items > 0:
-        return 65  # Some complexity but manageable
+        return 65
     
-    # Check description length as complexity indicator
     desc_length = len(desc)
     if desc_length > 1000:
-        return 40  # Very detailed = complex
+        return 40
     elif desc_length > 500:
-        return 55  # Detailed
+        return 55
     elif desc_length > 100:
-        return 70  # Moderate detail
+        return 70
     elif desc_length > 0:
-        return 75  # Brief
+        return 75
     else:
-        return 60  # No description - unclear effort
+        return 60
     
-    return 60  # Default
+    return 60
 
 def calculate_staleness(task):
-    """
-    Calculate staleness penalty score (0-100)
-    High score = task is stagnant and needs attention
-    """
+    """Calculate staleness penalty score (0-100)"""
     status = task.get('status', '')
     last_activity = task.get('dateLastActivity')
     
-    # Only penalize in-progress or in-review tasks
     if status not in ['In Progress', 'In Review', 'Testing']:
-        return 20  # Not applicable
+        return 20
     
     if not last_activity:
-        return 50  # No activity date, moderate concern
+        return 50
     
     try:
         last_date = datetime.fromisoformat(last_activity.replace('Z', '+00:00'))
@@ -320,70 +269,40 @@ def calculate_staleness(task):
         days_stale = (now - last_date).days
         
         if days_stale > 14:
-            return 95  # Severely stagnant - critical attention needed
+            return 95
         elif days_stale > 7:
-            return 85  # Very stale - needs immediate attention
+            return 85
         elif days_stale > 4:
-            return 70  # Getting stale
+            return 70
         elif days_stale > 2:
-            return 50  # Slightly stale
+            return 50
         else:
-            return 25  # Fresh, actively worked on
+            return 25
     except Exception as e:
         print(f"Error calculating staleness: {e}")
         return 40
     
     return 30
 
-def calculate_team_capacity(task):
-    """
-    Calculate team capacity score (0-100)
-    Higher score = better team capacity to complete task
-    """
-    assignees = task.get('assignee', [])
-    num_assignees = len(assignees)
-    
-    if num_assignees == 0:
-        return 40  # Unassigned - needs assignment
-    elif num_assignees == 1:
-        return 75  # Single owner - clear accountability
-    elif num_assignees == 2:
-        return 85  # Paired - good collaboration
-    elif num_assignees >= 3:
-        return 70  # Many assignees - may have coordination overhead
-    
-    return 60
-
 def calculate_activity_engagement(task):
-    """
-    Calculate engagement score based on comments and activity (0-100)
-    High activity = high stakeholder interest
-    """
+    """Calculate engagement score based on comments and activity (0-100)"""
     comment_count = task.get('comment_count', 0)
     activity_count = task.get('activity_count', 0)
     
     if comment_count > 10 or activity_count > 20:
-        return 80  # High engagement
+        return 80
     elif comment_count > 5 or activity_count > 10:
-        return 65  # Moderate engagement
+        return 65
     elif comment_count > 2 or activity_count > 5:
-        return 50  # Some engagement
+        return 50
     elif comment_count > 0 or activity_count > 0:
-        return 40  # Low engagement
+        return 40
     else:
-        return 30  # No engagement
+        return 30
 
 def calculate_priority_score(task, all_tasks):
-    """
-    Enhanced priority calculation with multiple factors
+    """Enhanced priority calculation with multiple factors"""
     
-    Formula:
-    Priority = (Urgency × 30%) + (Strategic × 25%) + 
-               (Dependency × 20%) + (Effort × 10%) + 
-               (Staleness × 10%) + (Engagement × 5%)
-    """
-    
-    # Calculate all factors
     urgency = calculate_urgency(task)
     strategic = calculate_strategic_value(task)
     dependency = calculate_dependency_score(task, all_tasks)
@@ -391,7 +310,6 @@ def calculate_priority_score(task, all_tasks):
     staleness = calculate_staleness(task)
     engagement = calculate_activity_engagement(task)
     
-    # Store breakdown for transparency
     task['priority_breakdown'] = {
         'urgency': round(urgency, 1),
         'strategic_value': round(strategic, 1),
@@ -401,7 +319,6 @@ def calculate_priority_score(task, all_tasks):
         'engagement': round(engagement, 1)
     }
     
-    # Weighted calculation
     priority_score = (
         (urgency * 0.30) +
         (strategic * 0.25) +
@@ -559,7 +476,11 @@ def home():
             'blockers': '/api/blockers',
             'quick_wins': '/api/quick-wins',
             'stale_tasks': '/api/stale-tasks',
-            'recommendations': '/api/recommendations'
+            'recommendations': '/api/recommendations',
+            'overdue': '/api/overdue',
+            'priority_breakdown': '/api/priority-breakdown',
+            'today': '/api/today',
+            'team_workload': '/api/team-workload'
         }
     }), 200
 
@@ -589,19 +510,213 @@ def get_all_tasks():
         
         tasks = normalize_tasks(cards, lists)
         
-        # Calculate priority for each task
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Sort by priority
         tasks.sort(key=lambda x: x['priority_score'], reverse=True)
         
-        # Calculate statistics
         avg_priority = sum(t['priority_score'] for t in tasks) / len(tasks)
         high_priority = sum(1 for t in tasks if t['priority_score'] > 75)
         medium_priority = sum(1 for t in tasks if 50 <= t['priority_score'] <= 75)
         low_priority = sum(1 for t in tasks if t['priority_score'] < 50)
         
+        return jsonify({
+            'success': True,
+            'total_tasks': len(tasks),
+            'statistics': {
+                'average_priority': round(avg_priority, 1),
+                'high_priority_count': high_priority,
+                'medium_priority_count': medium_priority,
+                'low_priority_count': low_priority
+            },
+            'tasks': tasks
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/next-task', methods=['GET'])
+def get_next_task():
+    """Get the highest priority task with detailed reasoning"""
+    try:
+        cards = get_trello_cards()
+        lists = get_trello_lists()
+        
+        if not cards:
+            return jsonify({
+                'success': True,
+                'message': '✅ No tasks yet!'
+            }), 200
+        
+        tasks = normalize_tasks(cards, lists)
+        
+        for task in tasks:
+            task['priority_score'] = calculate_priority_score(task, tasks)
+        
+        tasks.sort(key=lambda x: x['priority_score'], reverse=True)
+        
+        top_task = tasks[0]
+        breakdown = top_task.get('priority_breakdown', {})
+        
+        reasons = []
+        if breakdown.get('urgency', 0) > 70:
+            reasons.append(f"⏰ High urgency ({breakdown['urgency']}/100)")
+        if breakdown.get('strategic_value', 0) > 70:
+            reasons.append(f"⭐ High strategic value ({breakdown['strategic_value']}/100)")
+        if breakdown.get('dependency_impact', 0) > 70:
+            reasons.append(f"🔗 Blocking other tasks ({breakdown['dependency_impact']}/100)")
+        if breakdown.get('staleness', 0) > 70:
+            reasons.append(f"⚠️ Stagnant task needs attention ({breakdown['staleness']}/100)")
+        
+        return jsonify({
+            'success': True,
+            'task': top_task,
+            'message': f"🎯 Top Priority: {top_task['title']}",
+            'priority_score': f"{top_task['priority_score']}/100",
+            'reasons': reasons,
+            'recommendation': 'Focus on this task first to maximize impact'
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/summary', methods=['GET'])
+def get_summary():
+    """Get enhanced project summary with insights"""
+    try:
+        cards = get_trello_cards()
+        lists = get_trello_lists()
+        
+        tasks = normalize_tasks(cards, lists)
+        
+        if not tasks:
+            return jsonify({
+                'success': True,
+                'message': 'No tasks found'
+            }), 200
+        
+        for task in tasks:
+            task['priority_score'] = calculate_priority_score(task, tasks)
+        
+        status_counts = {}
+        for task in tasks:
+            status = task['status']
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        done_count = status_counts.get('Done', 0) + status_counts.get('Completed', 0)
+        completion_rate = round((done_count / len(tasks)) * 100) if tasks else 0
+        
+        high_priority = sum(1 for t in tasks if t['priority_score'] > 75)
+        medium_priority = sum(1 for t in tasks if 50 <= t['priority_score'] <= 75)
+        low_priority = sum(1 for t in tasks if t['priority_score'] < 50)
+        
+        overdue = sum(1 for t in tasks if t.get('deadline') and 
+                     datetime.fromisoformat(t['deadline'].replace('Z', '+00:00')) < 
+                     datetime.now(datetime.now().astimezone().tzinfo))
+        
+        stale = sum(1 for t in tasks if t.get('priority_breakdown', {}).get('staleness', 0) > 70)
+        
+        blocked = sum(1 for t in tasks if 'blocked' in t.get('description', '').lower() or 
+                     'waiting' in t.get('description', '').lower())
+        
+        return jsonify({
+            'success': True,
+            'summary': {
+                'total_tasks': len(tasks),
+                'completion_rate': completion_rate,
+                'by_status': status_counts,
+                'priority_distribution': {
+                    'high': high_priority,
+                    'medium': medium_priority,
+                    'low': low_priority
+                },
+                'health_indicators': {
+                    'overdue_tasks': overdue,
+                    'stale_tasks': stale,
+                    'blocked_tasks': blocked
+                },
+                'average_priority': round(sum(t['priority_score'] for t in tasks) / len(tasks), 1)
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_task_endpoint():
+    """Analyze a specific task with AI"""
+    try:
+        data = request.json
+        task_id = data.get('task_id')
+        
+        if not task_id:
+            return jsonify({
+                'success': False,
+                'error': 'task_id is required'
+            }), 400
+        
+        cards = get_trello_cards()
+        lists = get_trello_lists()
+        tasks = normalize_tasks(cards, lists)
+        
+        for task in tasks:
+            task['priority_score'] = calculate_priority_score(task, tasks)
+        
+        task = next((t for t in tasks if t['id'] == task_id), None)
+        
+        if not task:
+            return jsonify({
+                'success': False,
+                'error': 'Task not found'
+            }), 404
+        
+        analysis = analyze_task_with_ai(task, tasks)
+        
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'task_title': task['title'],
+            'priority_score': task['priority_score'],
+            'priority_breakdown': task.get('priority_breakdown', {}),
+            'analysis': analysis
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/risk', methods=['GET'])
+def get_risk_prediction():
+    """Get AI risk prediction for project"""
+    try:
+        cards = get_trello_cards()
+        lists = get_trello_lists()
+        tasks = normalize_tasks(cards, lists)
+        
+        if not tasks:
+            return jsonify({
+                'success': True,
+                'message': 'No tasks to analyze'
+            }), 200
+        
+        for task in tasks:
+            task['priority_score'] = calculate_priority_score(task, tasks)
+        
+        risk_analysis = predict_project_risk(tasks)
+        
+        return jsonify({
+            'success': True,
+            'risk_analysis': risk_analysis,
+            'task_count': len(tasks)
+        }), 200
+    except Exception as e:
         return jsonify({
             'success': False,
             'error': str(e)
@@ -615,11 +730,9 @@ def get_blockers():
         lists = get_trello_lists()
         tasks = normalize_tasks(cards, lists)
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Find blocker tasks
         blockers = []
         for task in tasks:
             labels = [l.lower() for l in task.get('labels', [])]
@@ -652,11 +765,9 @@ def get_quick_wins():
         lists = get_trello_lists()
         tasks = normalize_tasks(cards, lists)
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Filter for quick wins (high effort_impact score and not done)
         quick_wins = []
         for task in tasks:
             effort_score = task.get('priority_breakdown', {}).get('effort_vs_impact', 0)
@@ -687,11 +798,9 @@ def get_stale_tasks():
         lists = get_trello_lists()
         tasks = normalize_tasks(cards, lists)
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Filter for stale tasks
         stale_tasks = []
         for task in tasks:
             staleness_score = task.get('priority_breakdown', {}).get('staleness', 0)
@@ -736,7 +845,6 @@ def get_recommendations():
                 'message': 'No tasks to analyze'
             }), 200
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
@@ -761,11 +869,9 @@ def get_overdue_tasks():
         lists = get_trello_lists()
         tasks = normalize_tasks(cards, lists)
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Filter overdue tasks
         now = datetime.now(datetime.now().astimezone().tzinfo)
         overdue_tasks = []
         
@@ -809,11 +915,9 @@ def get_priority_breakdown():
                 'message': 'No tasks to analyze'
             }), 200
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Calculate averages for each factor
         total = len(tasks)
         avg_urgency = sum(t.get('priority_breakdown', {}).get('urgency', 0) for t in tasks) / total
         avg_strategic = sum(t.get('priority_breakdown', {}).get('strategic_value', 0) for t in tasks) / total
@@ -870,11 +974,9 @@ def get_today_focus():
                 'message': '✅ No tasks for today'
             }), 200
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Filter today's focus: high priority, due soon, or quick wins
         today_tasks = []
         now = datetime.now(datetime.now().astimezone().tzinfo)
         
@@ -887,7 +989,6 @@ def get_today_focus():
             deadline = task.get('deadline')
             effort_score = task.get('priority_breakdown', {}).get('effort_vs_impact', 0)
             
-            # Include if: high priority, due today/tomorrow, or quick win
             include = False
             reason = []
             
@@ -914,7 +1015,7 @@ def get_today_focus():
                 today_tasks.append(task)
         
         today_tasks.sort(key=lambda x: x['priority_score'], reverse=True)
-        today_tasks = today_tasks[:10]  # Limit to top 10
+        today_tasks = today_tasks[:10]
         
         return jsonify({
             'success': True,
@@ -936,11 +1037,9 @@ def get_team_workload():
         lists = get_trello_lists()
         tasks = normalize_tasks(cards, lists)
         
-        # Calculate priorities
         for task in tasks:
             task['priority_score'] = calculate_priority_score(task, tasks)
         
-        # Aggregate by assignee
         workload = {}
         unassigned_tasks = []
         
@@ -972,7 +1071,6 @@ def get_team_workload():
                         'status': task['status']
                     })
         
-        # Calculate average priority per person
         for assignee_id in workload:
             count = workload[assignee_id]['task_count']
             workload[assignee_id]['avg_priority'] = round(
@@ -1031,7 +1129,6 @@ def server_error(error):
 # ============================================
 
 if __name__ == '__main__':
-    # Get port from environment variable (required for Render)
     port = int(os.getenv('PORT', 10000))
     
     print("=" * 60)
@@ -1049,216 +1146,8 @@ if __name__ == '__main__':
     print("   • Dependency analysis")
     print("=" * 60)
     
-    # CRITICAL: Must bind to 0.0.0.0 for Render
     app.run(
         host='0.0.0.0',
         port=port,
-        debug=False  # Disable debug in production
-    ) True,
-            'total_tasks': len(tasks),
-            'statistics': {
-                'average_priority': round(avg_priority, 1),
-                'high_priority_count': high_priority,
-                'medium_priority_count': medium_priority,
-                'low_priority_count': low_priority
-            },
-            'tasks': tasks
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/next-task', methods=['GET'])
-def get_next_task():
-    """Get the highest priority task with detailed reasoning"""
-    try:
-        cards = get_trello_cards()
-        lists = get_trello_lists()
-        
-        if not cards:
-            return jsonify({
-                'success': True,
-                'message': '✅ No tasks yet!'
-            }), 200
-        
-        tasks = normalize_tasks(cards, lists)
-        
-        for task in tasks:
-            task['priority_score'] = calculate_priority_score(task, tasks)
-        
-        tasks.sort(key=lambda x: x['priority_score'], reverse=True)
-        
-        top_task = tasks[0]
-        breakdown = top_task.get('priority_breakdown', {})
-        
-        # Generate reasoning
-        reasons = []
-        if breakdown.get('urgency', 0) > 70:
-            reasons.append(f"⏰ High urgency ({breakdown['urgency']}/100)")
-        if breakdown.get('strategic_value', 0) > 70:
-            reasons.append(f"⭐ High strategic value ({breakdown['strategic_value']}/100)")
-        if breakdown.get('dependency_impact', 0) > 70:
-            reasons.append(f"🔗 Blocking other tasks ({breakdown['dependency_impact']}/100)")
-        if breakdown.get('staleness', 0) > 70:
-            reasons.append(f"⚠️ Stagnant task needs attention ({breakdown['staleness']}/100)")
-        
-        return jsonify({
-            'success': True,
-            'task': top_task,
-            'message': f"🎯 Top Priority: {top_task['title']}",
-            'priority_score': f"{top_task['priority_score']}/100",
-            'reasons': reasons,
-            'recommendation': 'Focus on this task first to maximize impact'
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/summary', methods=['GET'])
-def get_summary():
-    """Get enhanced project summary with insights"""
-    try:
-        cards = get_trello_cards()
-        lists = get_trello_lists()
-        
-        tasks = normalize_tasks(cards, lists)
-        
-        if not tasks:
-            return jsonify({
-                'success': True,
-                'message': 'No tasks found'
-            }), 200
-        
-        # Calculate priority scores
-        for task in tasks:
-            task['priority_score'] = calculate_priority_score(task, tasks)
-        
-        # Status distribution
-        status_counts = {}
-        for task in tasks:
-            status = task['status']
-            status_counts[status] = status_counts.get(status, 0) + 1
-        
-        # Completion rate
-        done_count = status_counts.get('Done', 0) + status_counts.get('Completed', 0)
-        completion_rate = round((done_count / len(tasks)) * 100) if tasks else 0
-        
-        # Priority distribution
-        high_priority = sum(1 for t in tasks if t['priority_score'] > 75)
-        medium_priority = sum(1 for t in tasks if 50 <= t['priority_score'] <= 75)
-        low_priority = sum(1 for t in tasks if t['priority_score'] < 50)
-        
-        # Overdue tasks
-        overdue = sum(1 for t in tasks if t.get('deadline') and 
-                     datetime.fromisoformat(t['deadline'].replace('Z', '+00:00')) < 
-                     datetime.now(datetime.now().astimezone().tzinfo))
-        
-        # Stale tasks
-        stale = sum(1 for t in tasks if t.get('priority_breakdown', {}).get('staleness', 0) > 70)
-        
-        # Blocked tasks
-        blocked = sum(1 for t in tasks if 'blocked' in t.get('description', '').lower() or 
-                     'waiting' in t.get('description', '').lower())
-        
-        return jsonify({
-            'success': True,
-            'summary': {
-                'total_tasks': len(tasks),
-                'completion_rate': completion_rate,
-                'by_status': status_counts,
-                'priority_distribution': {
-                    'high': high_priority,
-                    'medium': medium_priority,
-                    'low': low_priority
-                },
-                'health_indicators': {
-                    'overdue_tasks': overdue,
-                    'stale_tasks': stale,
-                    'blocked_tasks': blocked
-                },
-                'average_priority': round(sum(t['priority_score'] for t in tasks) / len(tasks), 1)
-            }
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/analyze', methods=['POST'])
-def analyze_task_endpoint():
-    """Analyze a specific task with AI"""
-    try:
-        data = request.json
-        task_id = data.get('task_id')
-        
-        if not task_id:
-            return jsonify({
-                'success': False,
-                'error': 'task_id is required'
-            }), 400
-        
-        cards = get_trello_cards()
-        lists = get_trello_lists()
-        tasks = normalize_tasks(cards, lists)
-        
-        # Calculate priorities
-        for task in tasks:
-            task['priority_score'] = calculate_priority_score(task, tasks)
-        
-        task = next((t for t in tasks if t['id'] == task_id), None)
-        
-        if not task:
-            return jsonify({
-                'success': False,
-                'error': 'Task not found'
-            }), 404
-        
-        analysis = analyze_task_with_ai(task, tasks)
-        
-        return jsonify({
-            'success': True,
-            'task_id': task_id,
-            'task_title': task['title'],
-            'priority_score': task['priority_score'],
-            'priority_breakdown': task.get('priority_breakdown', {}),
-            'analysis': analysis
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/risk', methods=['GET'])
-def get_risk_prediction():
-    """Get AI risk prediction for project"""
-    try:
-        cards = get_trello_cards()
-        lists = get_trello_lists()
-        tasks = normalize_tasks(cards, lists)
-        
-        if not tasks:
-            return jsonify({
-                'success': True,
-                'message': 'No tasks to analyze'
-            }), 200
-        
-        # Calculate priorities
-        for task in tasks:
-            task['priority_score'] = calculate_priority_score(task, tasks)
-        
-        risk_analysis = predict_project_risk(tasks)
-        
-        return jsonify({
-            'success': True,
-            'risk_analysis': risk_analysis,
-            'task_count': len(tasks)
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'success':
+        debug=False
+    )
